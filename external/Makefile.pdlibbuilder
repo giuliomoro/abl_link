@@ -441,7 +441,7 @@ endif
 
 # Beagle, Udoo, RPi2 etc.
 ifeq ($(machine), armv7l)
-  arch.c.flags = -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard
+  arch.c.flags = -march=armv7-a -mfpu=neon -mfloat-abi=hard
 endif
 
 # Intel 32 bit, build with SSE and SSE2 instructions
@@ -492,13 +492,13 @@ ifeq ($(system), Linux)
   pkglibdir = $(libdir)/pd-externals
   pdincludepath := $(wildcard /usr/include/pd)
   extension = pd_linux
-  cpp.flags := -DUNIX
+  cpp.flags := -DUNIX -I/usr/xenomai/include -D_GNU_SOURCE -D_REENTRANT -D__XENO__ -I/usr/xenomai/include/posix
   c.flags := -fPIC
   c.ldflags := -rdynamic -shared -fPIC -Wl,-rpath,"\$$ORIGIN",--enable-new-dtags
   c.ldlibs := -lc -lm
   cxx.flags := -fPIC -fcheck-new
-  cxx.ldflags := -rdynamic -shared -fPIC -Wl,-rpath,"\$$ORIGIN",--enable-new-dtags
-  cxx.ldlibs := -lc -lm -lstdc++
+  cxx.ldflags := -L/usr/xenomai/lib -rdynamic -shared -fPIC -Wl,-rpath,"\$$ORIGIN",--enable-new-dtags
+  cxx.ldlibs := -lc -lm -lstdc++ -lxenomai -lpthread -lrt
   shared.extension = so
   shared.ldflags := -rdynamic -fPIC -shared -Wl,-soname,$(shared.lib)
   stripflags = --strip-unneeded -R .note -R .comment

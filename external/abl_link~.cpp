@@ -12,9 +12,25 @@
 
 #include "abl_link_instance.hpp"
 #include "m_pd.h"
+#include <native/task.h>
+#include <native/timer.h>
 
 static t_class *abl_link_tilde_class;
 
+typedef struct newDataAvailable
+{ 
+  int tempo;
+  int curr_beat_time;
+  int curr_phase;
+  int step_out;
+} t_newDataAvailable;
+typedef struct newData
+{ 
+  float tempo;
+  float curr_beat_time;
+  float curr_phase;
+  float step_out;
+} t_newData;
 typedef struct _abl_link_tilde {
   t_object obj;
   t_clock *clock;
@@ -22,12 +38,15 @@ typedef struct _abl_link_tilde {
   t_outlet *phase_out;
   t_outlet *beat_out;
   t_outlet *tempo_out;
+  t_newDataAvailable newDataAvailable;
+  t_newData newData;
   double steps_per_beat;
   double prev_beat_time;
   double quantum;
   double tempo;
   int reset_flag;
   std::shared_ptr<abl_link::AblLinkWrapper> link;
+  RT_TASK task;
 } t_abl_link_tilde;
 
 static void abl_link_tilde_enable(t_abl_link_tilde *x, t_floatarg enabled) {
@@ -45,38 +64,88 @@ static void abl_link_tilde_dsp(t_abl_link_tilde *x, t_signal **sp) {
 }
 
 static void abl_link_tilde_tick(t_abl_link_tilde *x) {
-  std::chrono::microseconds curr_time;
-  auto& timeline = x->link->acquireAudioTimeline(&curr_time);
-  if (x->tempo < 0) {
-    timeline.setTempo(-x->tempo, curr_time);
+  static int init = 0;
+  if(init == 0)
+    rt_task_resume(&x->task);
+  init = 1;
+  if(x->newDataAvailable.tempo)
+  {
+    outlet_float(x->tempo_out, x->newData.tempo);
+    x->newDataAvailable.tempo = 0;
   }
-  const double prev_tempo = x->tempo;
-  x->tempo = timeline.tempo();
-  if (prev_tempo != x->tempo) {
-    outlet_float(x->tempo_out, x->tempo);
+  if(x->newDataAvailable.curr_beat_time)
+  {
+    outlet_float(x->beat_out, x->newData.curr_beat_time);
+    x->newDataAvailable.curr_beat_time = 0;
   }
-  double curr_beat_time;
-  if (x->reset_flag) {
-    timeline.requestBeatAtTime(x->prev_beat_time, curr_time, x->quantum);
-    curr_beat_time = timeline.beatAtTime(curr_time, x->quantum);
-    x->prev_beat_time = curr_beat_time - 1e-6;
-    x->reset_flag = 0;
-  } else {
-    curr_beat_time = timeline.beatAtTime(curr_time, x->quantum);
+  if(x->newDataAvailable.curr_phase)
+  {
+    outlet_float(x->phase_out, x->newData.curr_phase);
+    x->newDataAvailable.curr_phase = 0;
   }
-  outlet_float(x->beat_out, curr_beat_time);
-  const double curr_phase = fmod(curr_beat_time, x->quantum);
-  outlet_float(x->phase_out, curr_phase);
-  if (curr_beat_time > x->prev_beat_time) {
-    const double prev_phase = fmod(x->prev_beat_time, x->quantum);
-    const double prev_step = floor(prev_phase * x->steps_per_beat);
-    const double curr_step = floor(curr_phase * x->steps_per_beat);
-    if (prev_phase - curr_phase > x->quantum / 2 || prev_step != curr_step) {
-      outlet_float(x->step_out, curr_step);
+  if(x->newDataAvailable.step_out)
+  {
+    outlet_float(x->step_out, x->newData.step_out);
+    x->newDataAvailable.step_out = 0;
+  }
+}
+
+static void abl_link_tilde_do_tick(void* arg)
+{
+  while(1)
+  {
+    rt_task_sleep(1000000);
+    t_abl_link_tilde *x = (t_abl_link_tilde*)arg;
+    std::chrono::microseconds curr_time;
+    auto& timeline = x->link->acquireAudioTimeline(&curr_time);
+    if (x->tempo < 0) {
+      timeline.setTempo(-x->tempo, curr_time);
     }
+    const double prev_tempo = x->tempo;
+    x->tempo = timeline.tempo();
+    if (prev_tempo != x->tempo) {
+      if(x->newDataAvailable.tempo == 0)
+      {
+        x->newData.tempo = x->tempo;
+        x->newDataAvailable.tempo = 1;
+      }
+    }
+    double curr_beat_time;
+    if (x->reset_flag) {
+      timeline.requestBeatAtTime(x->prev_beat_time, curr_time, x->quantum);
+      curr_beat_time = timeline.beatAtTime(curr_time, x->quantum);
+      x->prev_beat_time = curr_beat_time - 1e-6;
+      x->reset_flag = 0;
+    } else {
+      curr_beat_time = timeline.beatAtTime(curr_time, x->quantum);
+    }
+    if(x->newDataAvailable.curr_beat_time == 0)
+    {
+      x->newData.curr_beat_time = curr_beat_time;
+      x->newDataAvailable.curr_beat_time = 1;
+    }
+    const double curr_phase = fmod(curr_beat_time, x->quantum);
+    if(x->newDataAvailable.curr_phase == 0)
+    {
+      x->newData.curr_phase = curr_phase;
+      x->newDataAvailable.curr_phase = 1;
+    }
+    // outlet_float(x->phase_out, curr_phase);
+    if (curr_beat_time > x->prev_beat_time) {
+      const double prev_phase = fmod(x->prev_beat_time, x->quantum);
+      const double prev_step = floor(prev_phase * x->steps_per_beat);
+      const double curr_step = floor(curr_phase * x->steps_per_beat);
+      if (prev_phase - curr_phase > x->quantum / 2 || prev_step != curr_step) {
+        if(x->newDataAvailable.step_out == 0)
+        {
+          x->newData.step_out = curr_step;
+          x->newDataAvailable.step_out = 1;
+        }
+      }
+    }
+    x->prev_beat_time = curr_beat_time;
+    x->link->releaseAudioTimeline();
   }
-  x->prev_beat_time = curr_beat_time;
-  x->link->releaseAudioTimeline();
 }
 
 static void abl_link_tilde_set_tempo(t_abl_link_tilde *x, t_floatarg bpm) {
@@ -111,6 +180,15 @@ static void abl_link_tilde_reset(t_abl_link_tilde *x, t_symbol *s,
 
 static void *abl_link_tilde_new(t_symbol *s, int argc, t_atom *argv) {
   t_abl_link_tilde *x = (t_abl_link_tilde *)pd_new(abl_link_tilde_class);
+  //memset(x, 0, sizeof(t_abl_link_tilde));
+  if(int ret = rt_task_create(&x->task, "abl_link", 0, 60, T_JOINABLE | T_FPU | T_SUSP)) {
+    fprintf(stderr, "Impossible to create abl_link~ task: %d\n", errno);
+    return NULL;
+  }
+  if(int ret = rt_task_start(&x->task, &abl_link_tilde_do_tick, x)) {
+    fprintf(stderr, "Error: unable to start Xenomai task abl_link\n");
+    return NULL;
+  }
   x->clock = clock_new(x, (t_method)abl_link_tilde_tick);
   x->step_out = outlet_new(&x->obj, &s_float);
   x->phase_out = outlet_new(&x->obj, &s_float);
@@ -141,6 +219,8 @@ static void *abl_link_tilde_new(t_symbol *s, int argc, t_atom *argv) {
 }
 
 static void abl_link_tilde_free(t_abl_link_tilde *x) {
+  rt_task_delete(&(x->task));
+  rt_task_join(&(x->task));
   clock_free(x->clock);
   x->link = nullptr;
 }
